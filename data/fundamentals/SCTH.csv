@@ -1,0 +1,4 @@
+ticker,period_end,available_date,revenue,net_income,total_assets,equity,free_cash_flow,shares_outstanding
+SCTH,2022-03-31,2022-04-25,9350.0,-59513,202073.0,190991.0,,
+SCTH,2022-06-30,2022-08-15,7803.0,-101999,235561.0,220981.0,-81052.0,
+SCTH,2022-09-30,2022-10-28,8525.0,-121750,174473.0,153531.0,-107345.0,

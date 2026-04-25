@@ -2,3 +2,5 @@ __pycache__/
 *.pyc
 logs/
 .DS_Store
+.env
+data/simfin_cache/

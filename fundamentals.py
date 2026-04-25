@@ -29,64 +29,83 @@ def pull_simfin(api_key: str, start: str = "2015-01-01") -> None:
     """
     Pull full historical fundamentals for all US stocks via SimFin.
     Free API key at https://app.simfin.com/api/users (no credit card).
-    Downloads bulk CSVs once and caches them locally.
+    Downloads bulk CSVs once (~200 MB) and caches them locally.
     """
-    try:
-        import simfin as sf
-        from simfin.names import (REVENUE, NET_INCOME, TOTAL_ASSETS,
-                                  SHARES_DILUTED, FREE_CASH_FLOW)
-    except ImportError:
-        print("Install simfin: pip install simfin")
-        return
+    import simfin as sf
 
     sf.set_api_key(api_key)
     sf.set_data_dir(os.path.join(os.path.dirname(__file__), "data", "simfin_cache"))
 
-    print("Downloading SimFin bulk data (first run downloads ~200 MB, cached after)...")
-
-    income  = sf.load_income(variant="quarterly",  market="us")
-    balance = sf.load_balance(variant="quarterly", market="us")
+    print("Downloading SimFin bulk data (first run ~200 MB, cached after)...")
+    income   = sf.load_income(variant="quarterly",  market="us")
+    balance  = sf.load_balance(variant="quarterly", market="us")
     cashflow = sf.load_cashflow(variant="quarterly", market="us")
 
-    print("Processing SimFin data...")
+    print("Processing and splitting by ticker...")
     os.makedirs(DATA_DIR, exist_ok=True)
 
-    # Merge on (Ticker, Report Date)
-    merged = income.join(balance,  how="left", rsuffix="_bal")
-    merged = merged.join(cashflow, how="left", rsuffix="_cf")
-    merged = merged.reset_index()
+    # Each df is indexed by (Ticker, Report Date)
+    inc = income.reset_index()
+    bal = balance.reset_index()
+    cf  = cashflow.reset_index()
 
-    # Normalise column names
-    col_map = {
-        "Ticker":          "ticker",
-        "Report Date":     "period_end",
-        "Revenue":         "revenue",
-        "Net Income":      "net_income",
-        "Total Assets":    "total_assets",
-        "Shares (Diluted)":"shares_outstanding",
-        "Free Cash Flow":  "free_cash_flow",
-    }
-    merged = merged.rename(columns={k: v for k, v in col_map.items() if k in merged.columns})
+    # Standardise column names to what we need
+    inc = inc.rename(columns={
+        "Ticker":           "ticker",
+        "Report Date":      "period_end",
+        "Revenue":          "revenue",
+        "Net Income":       "net_income",
+        "Shares (Diluted)": "shares_outstanding",
+        "Publish Date":     "publish_date",
+    })
+    bal = bal.rename(columns={
+        "Ticker":        "ticker",
+        "Report Date":   "period_end",
+        "Total Assets":  "total_assets",
+        "Total Equity":  "equity",
+    })
+    cf = cf.rename(columns={
+        "Ticker":                           "ticker",
+        "Report Date":                      "period_end",
+        "Net Cash from Operating Activities": "cfo",
+        "Change in Fixed Assets & Intangibles": "capex",
+    })
 
-    if "period_end" not in merged.columns:
-        print("  Warning: could not find 'Report Date' column in SimFin data")
-        return
+    # Keep only what we need before merge (avoids column collision)
+    inc_cols = ["ticker", "period_end", "publish_date", "revenue", "net_income", "shares_outstanding"]
+    bal_cols = ["ticker", "period_end", "total_assets", "equity"]
+    cf_cols  = ["ticker", "period_end", "cfo", "capex"]
 
-    merged["period_end"]    = pd.to_datetime(merged["period_end"])
-    merged["available_date"] = merged["period_end"] + pd.Timedelta(days=REPORTING_LAG_DAYS)
+    inc = inc[[c for c in inc_cols if c in inc.columns]]
+    bal = bal[[c for c in bal_cols if c in bal.columns]]
+    cf  = cf[[c for c in cf_cols  if c in cf.columns]]
 
-    # Filter date range
+    merged = inc.merge(bal, on=["ticker", "period_end"], how="left")
+    merged = merged.merge(cf,  on=["ticker", "period_end"], how="left")
+
+    merged["period_end"]   = pd.to_datetime(merged["period_end"])
+    merged["publish_date"] = pd.to_datetime(merged.get("publish_date"), errors="coerce")
+
+    # Use actual publish date if available, else period_end + 60 days
+    merged["available_date"] = merged["publish_date"].combine_first(
+        merged["period_end"] + pd.Timedelta(days=REPORTING_LAG_DAYS)
+    )
+
+    # Free cash flow = operating cash flow - capex
+    if "cfo" in merged.columns and "capex" in merged.columns:
+        merged["free_cash_flow"] = merged["cfo"] - merged["capex"].abs()
+
     merged = merged[merged["period_end"] >= pd.Timestamp(start)]
+    merged = merged.sort_values(["ticker", "period_end"])
 
     keep = ["ticker", "period_end", "available_date", "revenue", "net_income",
-            "total_assets", "shares_outstanding", "free_cash_flow"]
+            "total_assets", "equity", "free_cash_flow", "shares_outstanding"]
     keep = [c for c in keep if c in merged.columns]
-    merged = merged[keep].sort_values(["ticker", "period_end"])
+    merged = merged[keep]
 
     saved = 0
     for ticker, grp in merged.groupby("ticker"):
-        grp = grp.reset_index(drop=True)
-        grp.to_csv(os.path.join(DATA_DIR, f"{ticker}.csv"), index=False)
+        grp.reset_index(drop=True).to_csv(os.path.join(DATA_DIR, f"{ticker}.csv"), index=False)
         saved += 1
 
     print(f"SimFin: saved {saved} tickers to {DATA_DIR}/")

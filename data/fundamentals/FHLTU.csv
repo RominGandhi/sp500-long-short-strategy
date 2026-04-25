@@ -1,0 +1,4 @@
+ticker,period_end,available_date,revenue,net_income,total_assets,equity,free_cash_flow,shares_outstanding
+FHLTU,2023-03-31,2023-05-08,,-103814,17297688.0,6839328.0,,
+FHLTU,2023-06-30,2023-08-07,,47472,17086494.0,6886800.0,,
+FHLTU,2023-09-30,2023-11-13,,66286,17215171.0,6953086.0,,

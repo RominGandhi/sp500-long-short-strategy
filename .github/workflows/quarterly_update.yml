@@ -31,6 +31,14 @@ jobs:
       - name: Run incremental data update
         run: python data_pipeline.py --update
 
+      - name: Update universe (point-in-time membership)
+        run: python universe.py
+
+      - name: Refresh fundamentals
+        env:
+          SIMFIN_API_KEY: ${{ secrets.SIMFIN_API_KEY }}
+        run: python fundamentals.py --simfin-key $SIMFIN_API_KEY
+
       - name: Commit and push new quarter data
         run: |
           git config user.name  "github-actions[bot]"

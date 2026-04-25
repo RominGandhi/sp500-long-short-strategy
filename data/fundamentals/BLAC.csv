@@ -1,0 +1,4 @@
+ticker,period_end,available_date,revenue,net_income,total_assets,equity,free_cash_flow,shares_outstanding
+BLAC,2023-06-30,2023-08-14,,301464,71494506.0,68883135.0,,9055000.0
+BLAC,2023-09-30,2023-11-07,,78183,72136443.0,68961318.0,,9075421.0
+BLAC,2023-12-31,2024-04-17,,-86172,36627733.0,32519461.0,,7410225.0

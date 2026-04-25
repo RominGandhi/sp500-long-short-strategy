@@ -1,0 +1,4 @@
+ticker,period_end,available_date,revenue,net_income,total_assets,equity,free_cash_flow,shares_outstanding
+LATG,2022-03-31,2022-05-23,,7186897,134626170.0,126374972.0,,
+LATG,2022-06-30,2022-08-15,,1609356,134503012.0,127984328.0,,
+LATG,2022-09-30,2022-11-14,,-835600,134854995.0,127148728.0,,
