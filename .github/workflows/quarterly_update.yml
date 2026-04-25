@@ -29,7 +29,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install yfinance pandas requests lxml html5lib beautifulsoup4 simfin supabase python-dotenv numpy
+        run: pip install "pandas<2.2" yfinance requests lxml html5lib beautifulsoup4 simfin supabase python-dotenv numpy
 
       - name: Pull new quarter prices
         run: python data_pipeline.py --update
