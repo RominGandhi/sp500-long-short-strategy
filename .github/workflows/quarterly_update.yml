@@ -1,0 +1,48 @@
+name: Quarterly S&P 500 Data Update
+
+on:
+  schedule:
+    # 8 AM UTC on the 2nd day of Jan, Apr, Jul, Oct
+    # (2nd not 1st — markets closed Jan 1, and data isn't available yet on day 1)
+    - cron: "0 8 2 1,4,7,10 *"
+
+  # Allow manual trigger from GitHub UI anytime
+  workflow_dispatch:
+
+jobs:
+  update-data:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write   # needed to push data back to the repo
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install yfinance pandas requests lxml html5lib beautifulsoup4
+
+      - name: Run incremental data update
+        run: python data_pipeline.py --update
+
+      - name: Commit and push new quarter data
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/
+          git diff --cached --quiet && echo "No new data to commit" && exit 0
+          QUARTER=$(python -c "
+          import pandas as pd
+          from datetime import date
+          t = pd.Timestamp(date.today())
+          p = t.to_period('Q')
+          print(f\"{p.year}_Q{p.quarter}\")
+          ")
+          git commit -m "data: add $QUARTER S&P 500 data"
+          git push
