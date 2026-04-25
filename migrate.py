@@ -132,5 +132,74 @@ def run():
     print("\nMigration complete.")
 
 
+def push_current_quarter():
+    """
+    Lightweight version for GitHub Actions: only push the current quarter's
+    prices/returns + refreshed universe + fundamentals. Skips all historical data.
+    """
+    from datetime import date
+    import pandas as pd
+
+    today = pd.Timestamp(date.today())
+    q = today.to_period("Q")
+    label = f"{q.year}_Q{q.quarter}"
+    qdir = os.path.join(DATA_DIR, label)
+
+    print(f"Pushing current quarter: {label}")
+
+    # Prices + returns for current quarter only
+    p_path = os.path.join(qdir, "prices.csv")
+    if os.path.exists(p_path):
+        df = pd.read_csv(p_path, index_col=0, parse_dates=True)
+        df.index.name = "date"
+        long = (df.reset_index()
+                  .melt(id_vars="date", var_name="ticker", value_name="close")
+                  .dropna(subset=["close"]))
+        long["date"] = pd.to_datetime(long["date"]).dt.strftime("%Y-%m-%d")
+        upsert_df(long[["date", "ticker", "close"]], "prices")
+        print(f"  Prices: {len(long):,} rows")
+
+    r_path = os.path.join(qdir, "returns.csv")
+    if os.path.exists(r_path):
+        df = pd.read_csv(r_path, index_col=0, parse_dates=True)
+        df.index.name = "date"
+        long = (df.reset_index()
+                  .melt(id_vars="date", var_name="ticker", value_name="log_return")
+                  .dropna(subset=["log_return"]))
+        long["date"] = pd.to_datetime(long["date"]).dt.strftime("%Y-%m-%d")
+        upsert_df(long[["date", "ticker", "log_return"]], "returns")
+        print(f"  Returns: {len(long):,} rows")
+
+    # Index prices for current quarter
+    ip = os.path.join(qdir, "index.csv")
+    if os.path.exists(ip):
+        df = pd.read_csv(ip, skiprows=[1, 2], index_col=0, parse_dates=True)
+        df.index.name = "date"
+        df = df.reset_index()
+        df.columns = [c.lower() for c in df.columns]
+        df = df.rename(columns={"adj close": "close", "price": "close"})
+        df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
+        keep = [c for c in ["date", "open", "high", "low", "close", "volume"] if c in df.columns]
+        upsert_df(df[keep].dropna(subset=["close"]), "index_prices")
+        print(f"  Index: {len(df):,} rows")
+
+    # Full universe refresh (small file, always re-push)
+    migrate_universe()
+
+    # Fundamentals refresh
+    migrate_fundamentals()
+
+    print(f"Done pushing {label} to Supabase.")
+
+
 if __name__ == "__main__":
-    run()
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--full", action="store_true", help="Migrate all historical data")
+    parser.add_argument("--quarter", action="store_true", help="Push current quarter only (default for CI)")
+    args = parser.parse_args()
+
+    if args.full:
+        run()
+    else:
+        push_current_quarter()

@@ -52,7 +52,15 @@ def upsert_df(df: pd.DataFrame, table: str, chunk_size: int = CHUNK_SIZE):
 
     for i in range(0, len(records), chunk_size):
         batch = records[i : i + chunk_size]
-        sb.table(table).upsert(batch).execute()
+        for attempt in range(4):
+            try:
+                sb.table(table).upsert(batch).execute()
+                break
+            except Exception as e:
+                if attempt == 3:
+                    raise
+                import time
+                time.sleep(2 ** attempt)  # 1s, 2s, 4s backoff
         total += len(batch)
 
     return total

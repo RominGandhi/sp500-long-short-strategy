@@ -41,7 +41,7 @@ jobs:
         run: python fundamentals.py --simfin-key $SIMFIN_API_KEY
 
       - name: Push new data to Supabase
-        run: python migrate.py
+        run: python migrate.py --quarter
 
       - name: Commit CSVs to repo
         run: |
