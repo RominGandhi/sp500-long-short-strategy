@@ -3,10 +3,8 @@ name: Quarterly S&P 500 Data Update
 on:
   schedule:
     # 8 AM UTC on the 2nd day of Jan, Apr, Jul, Oct
-    # (2nd not 1st — markets closed Jan 1, and data isn't available yet on day 1)
     - cron: "0 8 2 1,4,7,10 *"
 
-  # Allow manual trigger from GitHub UI anytime
   workflow_dispatch:
 
 jobs:
@@ -14,7 +12,12 @@ jobs:
     runs-on: ubuntu-latest
 
     permissions:
-      contents: write   # needed to push data back to the repo
+      contents: write
+
+    env:
+      SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+      SIMFIN_API_KEY:       ${{ secrets.SIMFIN_API_KEY }}
 
     steps:
       - name: Checkout repo
@@ -26,20 +29,21 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install yfinance pandas requests lxml html5lib beautifulsoup4
+        run: pip install yfinance pandas requests lxml html5lib beautifulsoup4 simfin supabase python-dotenv numpy
 
-      - name: Run incremental data update
+      - name: Pull new quarter prices
         run: python data_pipeline.py --update
 
-      - name: Update universe (point-in-time membership)
+      - name: Rebuild point-in-time universe
         run: python universe.py
 
       - name: Refresh fundamentals
-        env:
-          SIMFIN_API_KEY: ${{ secrets.SIMFIN_API_KEY }}
         run: python fundamentals.py --simfin-key $SIMFIN_API_KEY
 
-      - name: Commit and push new quarter data
+      - name: Push new data to Supabase
+        run: python migrate.py
+
+      - name: Commit CSVs to repo
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
