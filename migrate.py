@@ -132,6 +132,20 @@ def run():
     print("\nMigration complete.")
 
 
+def _wait_for_supabase(max_wait: int = 60):
+    """Wait until Supabase schema cache is ready."""
+    import time
+    from db import client
+    sb = client()
+    for i in range(max_wait // 5):
+        try:
+            sb.table("prices").select("date").limit(1).execute()
+            return  # success
+        except Exception:
+            time.sleep(5)
+    raise RuntimeError("Supabase not ready after waiting")
+
+
 def push_current_quarter():
     """
     Lightweight version for GitHub Actions: only push the current quarter's
@@ -145,6 +159,8 @@ def push_current_quarter():
     label = f"{q.year}_Q{q.quarter}"
     qdir = os.path.join(DATA_DIR, label)
 
+    print("Waiting for Supabase schema cache...")
+    _wait_for_supabase()
     print(f"Pushing current quarter: {label}")
 
     # Prices + returns for current quarter only
