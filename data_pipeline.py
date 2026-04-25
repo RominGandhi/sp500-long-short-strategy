@@ -16,7 +16,8 @@ import yfinance as yf
 from datetime import date
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
-LOG_FILE = os.path.join(DATA_DIR, "update_log.csv")
+LOG_DIR  = os.path.join(os.path.dirname(__file__), "logs")
+LOG_FILE = os.path.join(LOG_DIR, "update_log.csv")
 
 
 def quarter_label(period: pd.Period) -> str:
@@ -126,6 +127,7 @@ def save_by_quarter(index_df: pd.DataFrame, prices: pd.DataFrame, overwrite_curr
 
 def log_run(quarters_saved: list[str]):
     """Append a record to update_log.csv so we can audit what ran when."""
+    os.makedirs(LOG_DIR, exist_ok=True)
     entry = pd.DataFrame([{
         "run_at": pd.Timestamp.now().isoformat(),
         "quarters_saved": ",".join(quarters_saved) if quarters_saved else "none",
