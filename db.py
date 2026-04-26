@@ -13,21 +13,28 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-SUPABASE_URL = os.getenv("SUPABASE_URL", "https://fvoanmhluogdzvbxcsat.supabase.co")
-SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
-CHUNK_SIZE   = 500
+CHUNK_SIZE = 500
+
+
+def _url() -> str:
+    return os.getenv("SUPABASE_URL", "https://fvoanmhluogdzvbxcsat.supabase.co")
+
+
+def _key() -> str:
+    return os.getenv("SUPABASE_SERVICE_KEY", "")
 
 
 def _headers():
+    key = _key()
     return {
-        "apikey":        SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "apikey":        key,
+        "Authorization": f"Bearer {key}",
         "Content-Type":  "application/json",
     }
 
 
 def _rest(table: str) -> str:
-    return f"{SUPABASE_URL}/rest/v1/{table}"
+    return f"{_url()}/rest/v1/{table}"
 
 
 # ── Bulk upsert ───────────────────────────────────────────────────────────────

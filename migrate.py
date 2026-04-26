@@ -156,8 +156,6 @@ def push_current_quarter():
     label = f"{q.year}_Q{q.quarter}"
     qdir = os.path.join(DATA_DIR, label)
 
-    print("Waiting for Supabase schema cache...")
-    _wait_for_supabase()
     print(f"Pushing current quarter: {label}")
 
     # Prices + returns for current quarter only
