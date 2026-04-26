@@ -1,157 +1,158 @@
 """
-Supabase interface for the S&P 500 long/short pipeline.
-Uses raw HTTP requests — no supabase-py client needed, works on all Python versions.
+PostgreSQL interface via SQLAlchemy + psycopg2.
+Works with Neon (and any standard PostgreSQL).
 """
 
 import os
 import math
-import time
-import requests
 import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
+from sqlalchemy import create_engine, text
 
 load_dotenv()
 
-CHUNK_SIZE = 500
+DATABASE_URL = os.getenv("DATABASE_URL")
+CHUNK_SIZE   = 5000
 
 
-def _url() -> str:
-    return os.getenv("SUPABASE_URL", "https://fvoanmhluogdzvbxcsat.supabase.co")
+def get_engine():
+    return create_engine(DATABASE_URL, pool_pre_ping=True)
 
 
-def _key() -> str:
-    return os.getenv("SUPABASE_SERVICE_KEY", "")
+# ── Schema ────────────────────────────────────────────────────────────────────
 
-
-def _headers():
-    key = _key()
-    return {
-        "apikey":        key,
-        "Authorization": f"Bearer {key}",
-        "Content-Type":  "application/json",
-    }
-
-
-def _rest(table: str) -> str:
-    return f"{_url()}/rest/v1/{table}"
+def create_schema():
+    sql = """
+    CREATE TABLE IF NOT EXISTS prices (
+        date    DATE NOT NULL,
+        ticker  TEXT NOT NULL,
+        close   NUMERIC,
+        PRIMARY KEY (date, ticker)
+    );
+    CREATE TABLE IF NOT EXISTS index_prices (
+        date    DATE NOT NULL PRIMARY KEY,
+        open    NUMERIC,
+        high    NUMERIC,
+        low     NUMERIC,
+        close   NUMERIC,
+        volume  BIGINT
+    );
+    CREATE TABLE IF NOT EXISTS returns (
+        date        DATE NOT NULL,
+        ticker      TEXT NOT NULL,
+        log_return  NUMERIC,
+        PRIMARY KEY (date, ticker)
+    );
+    CREATE TABLE IF NOT EXISTS pit_universe (
+        date    DATE NOT NULL,
+        ticker  TEXT NOT NULL,
+        PRIMARY KEY (date, ticker)
+    );
+    CREATE TABLE IF NOT EXISTS fundamentals (
+        ticker              TEXT NOT NULL,
+        period_end          DATE NOT NULL,
+        available_date      DATE,
+        revenue             NUMERIC,
+        net_income          NUMERIC,
+        total_assets        NUMERIC,
+        equity              NUMERIC,
+        free_cash_flow      NUMERIC,
+        shares_outstanding  NUMERIC,
+        PRIMARY KEY (ticker, period_end)
+    );
+    CREATE INDEX IF NOT EXISTS idx_prices_ticker      ON prices (ticker, date);
+    CREATE INDEX IF NOT EXISTS idx_returns_ticker     ON returns (ticker, date);
+    CREATE INDEX IF NOT EXISTS idx_pit_date           ON pit_universe (date);
+    CREATE INDEX IF NOT EXISTS idx_fundamentals_avail ON fundamentals (ticker, available_date);
+    """
+    engine = get_engine()
+    with engine.connect() as conn:
+        conn.execute(text(sql))
+        conn.commit()
+    print("Schema ready.")
 
 
 # ── Bulk upsert ───────────────────────────────────────────────────────────────
 
+def _clean(df: pd.DataFrame) -> pd.DataFrame:
+    return df.replace([float("inf"), float("-inf")], None).where(pd.notnull(df), None)
+
+
 def upsert_df(df: pd.DataFrame, table: str, chunk_size: int = CHUNK_SIZE):
-    """Upsert a DataFrame into a Supabase table using direct HTTP with retries."""
+    """Bulk upsert using PostgreSQL INSERT ... ON CONFLICT DO UPDATE."""
     if df.empty:
         return 0
 
-    df = df.replace([float("inf"), float("-inf")], pd.NA)
-    df = df.where(pd.notnull(df), None)
+    df = _clean(df)
+    engine = get_engine()
+    cols   = list(df.columns)
+    pks    = {"prices": ["date","ticker"], "index_prices": ["date"],
+              "returns": ["date","ticker"], "pit_universe": ["date","ticker"],
+              "fundamentals": ["ticker","period_end"]}
+    pk     = pks.get(table, [])
+    update = [c for c in cols if c not in pk]
 
-    def _safe(v):
-        if v is None:
-            return None
-        if isinstance(v, float) and math.isnan(v):
-            return None
-        if isinstance(v, (np.integer,)):
-            return int(v)
-        if isinstance(v, (np.floating,)):
-            return None if math.isnan(float(v)) else float(v)
-        if isinstance(v, (np.bool_,)):
-            return bool(v)
-        return v
+    col_list    = ", ".join(cols)
+    placeholder = ", ".join(f":{c}" for c in cols)
+    conflict    = ", ".join(pk)
+    set_clause  = ", ".join(f"{c} = EXCLUDED.{c}" for c in update)
 
-    records = [{k: _safe(v) for k, v in row.items()} for row in df.to_dict(orient="records")]
-    headers = {**_headers(), "Prefer": "resolution=merge-duplicates"}
-    url = _rest(table)
+    sql = text(f"""
+        INSERT INTO {table} ({col_list})
+        VALUES ({placeholder})
+        ON CONFLICT ({conflict}) DO UPDATE SET {set_clause}
+    """)
+
     total = 0
-
-    for i in range(0, len(records), chunk_size):
-        batch = records[i : i + chunk_size]
-        for attempt in range(5):
-            r = requests.post(url, json=batch, headers=headers)
-            if r.status_code in (200, 201):
-                break
-            if attempt == 4:
-                raise RuntimeError(f"Supabase upsert failed [{r.status_code}]: {r.text[:300]}")
-            time.sleep(2 ** attempt)
-        total += len(batch)
+    with engine.connect() as conn:
+        for i in range(0, len(df), chunk_size):
+            batch = df.iloc[i : i + chunk_size].to_dict(orient="records")
+            conn.execute(sql, batch)
+            total += len(batch)
+        conn.commit()
 
     return total
 
 
 # ── Query helpers ─────────────────────────────────────────────────────────────
 
-def _select(table: str, params: dict) -> list:
-    r = requests.get(_rest(table), headers=_headers(), params=params)
-    r.raise_for_status()
-    return r.json()
+def query(sql: str, params: dict = None) -> pd.DataFrame:
+    engine = get_engine()
+    with engine.connect() as conn:
+        return pd.read_sql(text(sql), conn, params=params or {})
 
 
 def get_prices(ticker: str, start: str, end: str) -> pd.DataFrame:
-    data = _select("prices", {
-        "select": "date,close",
-        "ticker": f"eq.{ticker}",
-        "date":   f"gte.{start}",
-        "order":  "date",
-    })
-    df = pd.DataFrame(data)
-    df = df[df["date"] <= end] if not df.empty else df
-    return df
+    return query(
+        "SELECT date, close FROM prices WHERE ticker=:t AND date BETWEEN :s AND :e ORDER BY date",
+        {"t": ticker, "s": start, "e": end}
+    )
 
 
 def get_universe_on(date: str) -> list:
-    data = _select("pit_universe", {"select": "ticker", "date": f"eq.{date}"})
-    return [r["ticker"] for r in data]
+    df = query("SELECT ticker FROM pit_universe WHERE date=:d", {"d": date})
+    return df["ticker"].tolist()
 
 
 def get_fundamentals_as_of(ticker: str, signal_date: str):
-    data = _select("fundamentals", {
-        "select":         "*",
-        "ticker":         f"eq.{ticker}",
-        "available_date": f"lte.{signal_date}",
-        "order":          "period_end.desc",
-        "limit":          "1",
-    })
-    return pd.Series(data[0]) if data else None
+    df = query("""
+        SELECT * FROM fundamentals
+        WHERE ticker=:t AND available_date<=:d
+        ORDER BY period_end DESC LIMIT 1
+    """, {"t": ticker, "d": signal_date})
+    return df.iloc[0] if not df.empty else None
 
 
-def get_returns_matrix(start: str, end: str, tickers: list = None) -> pd.DataFrame:
-    if tickers is None:
-        data = _select("pit_universe", {
-            "select": "ticker",
-            "date":   f"gte.{start}",
-        })
-        tickers = list({r["ticker"] for r in data})
-
-    all_rows = []
-    for i in range(0, len(tickers), 50):
-        batch = tickers[i : i + 50]
-        data = _select("returns", {
-            "select": "date,ticker,log_return",
-            "ticker": f"in.({','.join(batch)})",
-            "date":   f"gte.{start}",
-            "order":  "date",
-        })
-        all_rows.extend(data)
-
-    if not all_rows:
-        return pd.DataFrame()
-
-    df = pd.DataFrame(all_rows)
-    df = df[df["date"] <= end]
+def get_returns_matrix(start: str, end: str) -> pd.DataFrame:
+    df = query("""
+        SELECT r.date, r.ticker, r.log_return
+        FROM returns r
+        JOIN pit_universe u ON r.date=u.date AND r.ticker=u.ticker
+        WHERE r.date BETWEEN :s AND :e
+        ORDER BY r.date
+    """, {"s": start, "e": end})
+    if df.empty:
+        return df
     df["date"] = pd.to_datetime(df["date"])
     return df.pivot(index="date", columns="ticker", values="log_return")
-
-
-def ping() -> bool:
-    """Return True if Supabase is reachable and schema is ready."""
-    try:
-        r = requests.get(
-            _rest("prices"),
-            headers=_headers(),
-            params={"select": "date", "limit": "1"},
-            timeout=10,
-        )
-        return r.status_code == 200
-    except Exception:
-        return False

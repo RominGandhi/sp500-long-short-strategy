@@ -1,102 +1,106 @@
 """
-One-time migration: load all CSV data into Supabase.
+One-time migration: load all CSV data into Neon PostgreSQL.
+Uses fast bulk COPY via pandas to_sql() — much faster than row-by-row upserts.
 
-Prerequisites:
-  1. Run schema.sql in the Supabase SQL Editor first
-  2. Then: python3 migrate.py
+Run modes:
+  python3 migrate.py          # push current quarter only (default for CI)
+  python3 migrate.py --full   # full historical load (run once on setup)
 """
 
 import os
 import pandas as pd
-from db import upsert_df
+from db import get_engine, create_schema
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 
 
-def migrate_prices_and_returns():
-    quarters = sorted(
-        d for d in os.listdir(DATA_DIR)
-        if os.path.isdir(os.path.join(DATA_DIR, d)) and d[0].isdigit()
-    )
-    print(f"Migrating {len(quarters)} quarters of prices + returns...")
+def _wide_to_long(csv_path: str, value_name: str) -> pd.DataFrame:
+    """Read a wide prices/returns CSV and melt to long format."""
+    df = pd.read_csv(csv_path, skiprows=[1, 2] if _has_multiindex(csv_path) else [],
+                     index_col=0, parse_dates=True)
+    df.index.name = "date"
+    long = (df.reset_index()
+              .melt(id_vars="date", var_name="ticker", value_name=value_name)
+              .dropna(subset=[value_name]))
+    long["date"] = pd.to_datetime(long["date"]).dt.date
+    return long
 
-    for q in quarters:
-        qdir = os.path.join(DATA_DIR, q)
 
-        p_path = os.path.join(qdir, "prices.csv")
-        if os.path.exists(p_path):
-            df = pd.read_csv(p_path, index_col=0, parse_dates=True)
-            df.index.name = "date"
-            long = (df.reset_index()
-                      .melt(id_vars="date", var_name="ticker", value_name="close")
-                      .dropna(subset=["close"]))
-            long["date"] = pd.to_datetime(long["date"]).dt.strftime("%Y-%m-%d")
-            n = upsert_df(long[["date", "ticker", "close"]], "prices")
+def _has_multiindex(path: str) -> bool:
+    with open(path) as f:
+        second = f.readlines()[1] if sum(1 for _ in open(path)) > 1 else ""
+    return second.startswith("Ticker")
 
-        r_path = os.path.join(qdir, "returns.csv")
-        if os.path.exists(r_path):
-            df = pd.read_csv(r_path, index_col=0, parse_dates=True)
-            df.index.name = "date"
-            long = (df.reset_index()
-                      .melt(id_vars="date", var_name="ticker", value_name="log_return")
-                      .dropna(subset=["log_return"]))
-            long["date"] = pd.to_datetime(long["date"]).dt.strftime("%Y-%m-%d")
-            upsert_df(long[["date", "ticker", "log_return"]], "returns")
 
-        print(f"  {q} done")
+def _bulk_insert(df: pd.DataFrame, table: str, chunk: int = 10000):
+    """Fast bulk insert using to_sql COPY-style."""
+    engine = get_engine()
+    df.to_sql(table, engine, if_exists="append", index=False,
+              chunksize=chunk, method="multi")
 
 
 def migrate_index():
-    quarters = sorted(
-        d for d in os.listdir(DATA_DIR)
-        if os.path.isdir(os.path.join(DATA_DIR, d)) and d[0].isdigit()
-    )
     frames = []
+    quarters = sorted(d for d in os.listdir(DATA_DIR)
+                      if os.path.isdir(os.path.join(DATA_DIR, d)) and d[0].isdigit())
     for q in quarters:
-        ip = os.path.join(DATA_DIR, q, "index.csv")
-        if os.path.exists(ip):
-            frames.append(pd.read_csv(ip, skiprows=[1, 2], index_col=0, parse_dates=True))
+        p = os.path.join(DATA_DIR, q, "index.csv")
+        if os.path.exists(p):
+            frames.append(pd.read_csv(p, skiprows=[1, 2], index_col=0, parse_dates=True))
 
     if not frames:
         return
-
     df = pd.concat(frames).drop_duplicates()
     df.index.name = "date"
     df = df.reset_index()
-
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = [c[0].lower() for c in df.columns]
-    else:
-        df.columns = [c.lower() for c in df.columns]
-
+    df.columns = [c.lower() for c in df.columns]
     df = df.rename(columns={"adj close": "close", "price": "close"})
-    df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
+    df["date"] = pd.to_datetime(df["date"]).dt.date
     keep = [c for c in ["date", "open", "high", "low", "close", "volume"] if c in df.columns]
     df = df[keep].dropna(subset=["close"])
-    upsert_df(df, "index_prices")
-    print(f"Index: {len(df)} rows")
+    _bulk_insert(df, "index_prices")
+    print(f"  index_prices: {len(df):,} rows")
+
+
+def migrate_prices_and_returns(quarters: list):
+    total_p = total_r = 0
+    for q in quarters:
+        qdir = os.path.join(DATA_DIR, q)
+
+        p = os.path.join(qdir, "prices.csv")
+        if os.path.exists(p):
+            df = _wide_to_long(p, "close")
+            _bulk_insert(df[["date", "ticker", "close"]], "prices")
+            total_p += len(df)
+
+        r = os.path.join(qdir, "returns.csv")
+        if os.path.exists(r):
+            df = _wide_to_long(r, "log_return")
+            _bulk_insert(df[["date", "ticker", "log_return"]], "returns")
+            total_r += len(df)
+
+        print(f"  {q} done", flush=True)
+
+    print(f"  prices total:  {total_p:,}")
+    print(f"  returns total: {total_r:,}")
 
 
 def migrate_universe():
     path = os.path.join(DATA_DIR, "universe", "pit_membership.csv")
     if not os.path.exists(path):
-        print("No pit_membership.csv — run universe.py first")
+        print("  No pit_membership.csv — run universe.py first")
         return
     df = pd.read_csv(path, parse_dates=["date"])
-    df["date"] = df["date"].dt.strftime("%Y-%m-%d")
-    upsert_df(df[["date", "ticker"]], "pit_universe")
-    print(f"Universe: {len(df):,} rows")
+    df["date"] = df["date"].dt.date
+    _bulk_insert(df[["date", "ticker"]], "pit_universe")
+    print(f"  pit_universe: {len(df):,} rows")
 
 
 def migrate_fundamentals():
     fund_dir = os.path.join(DATA_DIR, "fundamentals")
     if not os.path.exists(fund_dir):
-        print("No fundamentals dir — run fundamentals.py first")
         return
-
     files = [f for f in os.listdir(fund_dir) if f.endswith(".csv")]
-    print(f"Migrating fundamentals: {len(files)} tickers...")
-
     frames = []
     for fname in files:
         ticker = fname.replace(".csv", "")
@@ -107,23 +111,35 @@ def migrate_fundamentals():
         frames.append(df)
 
     combined = pd.concat(frames, ignore_index=True)
-    combined["period_end"]     = pd.to_datetime(combined["period_end"]).dt.strftime("%Y-%m-%d")
-    combined["available_date"] = pd.to_datetime(combined["available_date"]).dt.strftime("%Y-%m-%d")
+    combined["period_end"]     = pd.to_datetime(combined["period_end"]).dt.date
+    combined["available_date"] = pd.to_datetime(combined["available_date"]).dt.date
     keep = ["ticker", "period_end", "available_date", "revenue", "net_income",
             "total_assets", "equity", "free_cash_flow", "shares_outstanding"]
     combined = combined[[c for c in keep if c in combined.columns]]
-    upsert_df(combined, "fundamentals")
-    print(f"Fundamentals: {len(combined):,} rows")
+    _bulk_insert(combined, "fundamentals")
+    print(f"  fundamentals: {len(combined):,} rows")
 
 
-def run():
-    print("── Index prices ──")
+def run_full():
+    """Truncate all tables and reload everything from scratch."""
+    engine = get_engine()
+    with engine.connect() as conn:
+        from sqlalchemy import text
+        for t in ["prices", "returns", "index_prices", "pit_universe", "fundamentals"]:
+            conn.execute(text(f"TRUNCATE TABLE {t}"))
+        conn.commit()
+    print("Tables cleared.")
+
+    quarters = sorted(d for d in os.listdir(DATA_DIR)
+                      if os.path.isdir(os.path.join(DATA_DIR, d)) and d[0].isdigit())
+
+    print("\n── Index prices ──")
     migrate_index()
 
     print("\n── Prices + Returns ──")
-    migrate_prices_and_returns()
+    migrate_prices_and_returns(quarters)
 
-    print("\n── Point-in-time universe ──")
+    print("\n── Universe ──")
     migrate_universe()
 
     print("\n── Fundamentals ──")
@@ -132,85 +148,38 @@ def run():
     print("\nMigration complete.")
 
 
-def _wait_for_supabase(max_wait: int = 30):
-    """Wait until Supabase is reachable."""
-    import time
-    from db import ping
-    for _ in range(max_wait // 5):
-        if ping():
-            return
-        time.sleep(5)
-    raise RuntimeError("Supabase not reachable after waiting")
-
-
 def push_current_quarter():
-    """
-    Lightweight version for GitHub Actions: only push the current quarter's
-    prices/returns + refreshed universe + fundamentals. Skips all historical data.
-    """
+    """Push only the current quarter — used by GitHub Actions."""
     from datetime import date
-    import pandas as pd
-
     today = pd.Timestamp(date.today())
     q = today.to_period("Q")
     label = f"{q.year}_Q{q.quarter}"
-    qdir = os.path.join(DATA_DIR, label)
+    print(f"Pushing {label} to Neon...")
 
-    print(f"Pushing current quarter: {label}")
+    engine = get_engine()
+    with engine.connect() as conn:
+        from sqlalchemy import text
+        # Remove existing rows for this quarter's date range
+        start = str(q.start_time.date())
+        end   = str(q.end_time.date())
+        conn.execute(text(f"DELETE FROM prices     WHERE date BETWEEN '{start}' AND '{end}'"))
+        conn.execute(text(f"DELETE FROM returns    WHERE date BETWEEN '{start}' AND '{end}'"))
+        conn.execute(text(f"DELETE FROM index_prices WHERE date BETWEEN '{start}' AND '{end}'"))
+        conn.commit()
 
-    # Prices + returns for current quarter only
-    p_path = os.path.join(qdir, "prices.csv")
-    if os.path.exists(p_path):
-        df = pd.read_csv(p_path, index_col=0, parse_dates=True)
-        df.index.name = "date"
-        long = (df.reset_index()
-                  .melt(id_vars="date", var_name="ticker", value_name="close")
-                  .dropna(subset=["close"]))
-        long["date"] = pd.to_datetime(long["date"]).dt.strftime("%Y-%m-%d")
-        upsert_df(long[["date", "ticker", "close"]], "prices")
-        print(f"  Prices: {len(long):,} rows")
-
-    r_path = os.path.join(qdir, "returns.csv")
-    if os.path.exists(r_path):
-        df = pd.read_csv(r_path, index_col=0, parse_dates=True)
-        df.index.name = "date"
-        long = (df.reset_index()
-                  .melt(id_vars="date", var_name="ticker", value_name="log_return")
-                  .dropna(subset=["log_return"]))
-        long["date"] = pd.to_datetime(long["date"]).dt.strftime("%Y-%m-%d")
-        upsert_df(long[["date", "ticker", "log_return"]], "returns")
-        print(f"  Returns: {len(long):,} rows")
-
-    # Index prices for current quarter
-    ip = os.path.join(qdir, "index.csv")
-    if os.path.exists(ip):
-        df = pd.read_csv(ip, skiprows=[1, 2], index_col=0, parse_dates=True)
-        df.index.name = "date"
-        df = df.reset_index()
-        df.columns = [c.lower() for c in df.columns]
-        df = df.rename(columns={"adj close": "close", "price": "close"})
-        df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
-        keep = [c for c in ["date", "open", "high", "low", "close", "volume"] if c in df.columns]
-        upsert_df(df[keep].dropna(subset=["close"]), "index_prices")
-        print(f"  Index: {len(df):,} rows")
-
-    # Full universe refresh (small file, always re-push)
+    migrate_prices_and_returns([label])
+    migrate_index()
     migrate_universe()
-
-    # Fundamentals refresh
     migrate_fundamentals()
-
-    print(f"Done pushing {label} to Supabase.")
+    print("Done.")
 
 
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--full", action="store_true", help="Migrate all historical data")
-    parser.add_argument("--quarter", action="store_true", help="Push current quarter only (default for CI)")
+    parser.add_argument("--full", action="store_true", help="Full reload from scratch")
     args = parser.parse_args()
-
     if args.full:
-        run()
+        run_full()
     else:
         push_current_quarter()
