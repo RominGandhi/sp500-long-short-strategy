@@ -31,16 +31,16 @@ jobs:
         run: pip install "pandas<2.2" yfinance requests lxml html5lib beautifulsoup4 simfin psycopg2-binary sqlalchemy python-dotenv numpy
 
       - name: Pull new quarter prices
-        run: python data_pipeline.py --update
+        run: python data_preprocessing/data_pipeline.py --update
 
       - name: Rebuild point-in-time universe
-        run: python universe.py
+        run: python data_preprocessing/universe.py
 
       - name: Refresh fundamentals
-        run: python fundamentals.py --simfin-key $SIMFIN_API_KEY
+        run: python data_preprocessing/fundamentals.py --simfin-key $SIMFIN_API_KEY
 
       - name: Push new data to Neon
-        run: python migrate.py
+        run: python database/migrate.py
 
       - name: Commit CSVs to repo
         run: |
