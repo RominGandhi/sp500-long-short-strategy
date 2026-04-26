@@ -163,15 +163,51 @@ def push_current_quarter():
         # Remove existing rows for this quarter's date range
         start = str(q.start_time.date())
         end   = str(q.end_time.date())
-        conn.execute(text(f"DELETE FROM prices     WHERE date BETWEEN '{start}' AND '{end}'"))
-        conn.execute(text(f"DELETE FROM returns    WHERE date BETWEEN '{start}' AND '{end}'"))
+        conn.execute(text(f"DELETE FROM prices       WHERE date BETWEEN '{start}' AND '{end}'"))
+        conn.execute(text(f"DELETE FROM returns      WHERE date BETWEEN '{start}' AND '{end}'"))
         conn.execute(text(f"DELETE FROM index_prices WHERE date BETWEEN '{start}' AND '{end}'"))
+        conn.execute(text(f"DELETE FROM pit_universe WHERE date BETWEEN '{start}' AND '{end}'"))
+        conn.execute(text(f"DELETE FROM fundamentals WHERE available_date BETWEEN '{start}' AND '{end}'"))
         conn.commit()
 
     migrate_prices_and_returns([label])
     migrate_index(quarters=[label])
-    migrate_universe()
-    migrate_fundamentals()
+
+    # Universe: only insert rows for this quarter's date range
+    path = os.path.join(DATA_DIR, "universe", "pit_membership.csv")
+    if os.path.exists(path):
+        df = pd.read_csv(path, parse_dates=["date"])
+        df["date"] = pd.to_datetime(df["date"])
+        mask = (df["date"] >= start) & (df["date"] <= end)
+        df = df[mask].copy()
+        df["date"] = df["date"].dt.date
+        _bulk_insert(df[["date", "ticker"]], "pit_universe")
+        print(f"  pit_universe: {len(df):,} rows")
+
+    # Fundamentals: only insert rows with available_date in this quarter
+    fund_dir = os.path.join(DATA_DIR, "fundamentals")
+    if os.path.exists(fund_dir):
+        files = [f for f in os.listdir(fund_dir) if f.endswith(".csv")]
+        frames = []
+        for fname in files:
+            ticker = fname.replace(".csv", "")
+            df = pd.read_csv(os.path.join(fund_dir, fname),
+                             parse_dates=["period_end", "available_date"])
+            if "ticker" not in df.columns:
+                df.insert(0, "ticker", ticker)
+            mask = (df["available_date"] >= start) & (df["available_date"] <= end)
+            if mask.any():
+                frames.append(df[mask])
+        if frames:
+            combined = pd.concat(frames, ignore_index=True)
+            combined["period_end"]     = pd.to_datetime(combined["period_end"]).dt.date
+            combined["available_date"] = pd.to_datetime(combined["available_date"]).dt.date
+            keep = ["ticker", "period_end", "available_date", "revenue", "net_income",
+                    "total_assets", "equity", "free_cash_flow", "shares_outstanding"]
+            combined = combined[[c for c in keep if c in combined.columns]]
+            _bulk_insert(combined, "fundamentals")
+            print(f"  fundamentals: {len(combined):,} rows")
+
     print("Done.")
 
 
