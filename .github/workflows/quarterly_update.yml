@@ -40,6 +40,24 @@ jobs:
       - name: Refresh fundamentals
         run: python fundamentals.py --simfin-key $SIMFIN_API_KEY
 
+      - name: Wake up Supabase (free tier pauses after inactivity)
+        run: |
+          python -c "
+          import requests, os, time
+          url = os.environ['SUPABASE_URL'] + '/rest/v1/prices?select=date&limit=1'
+          key = os.environ['SUPABASE_SERVICE_KEY']
+          headers = {'apikey': key, 'Authorization': 'Bearer ' + key}
+          for i in range(24):          # wait up to 2 minutes
+              r = requests.get(url, headers=headers, timeout=15)
+              if r.status_code == 200:
+                  print(f'Supabase ready after {i*5}s')
+                  break
+              print(f'Waiting for DB to wake up... ({i*5}s)')
+              time.sleep(5)
+          else:
+              raise RuntimeError('Supabase did not wake up in time')
+          "
+
       - name: Push new data to Supabase
         run: python migrate.py --quarter
 
