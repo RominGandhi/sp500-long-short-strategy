@@ -132,18 +132,15 @@ def run():
     print("\nMigration complete.")
 
 
-def _wait_for_supabase(max_wait: int = 60):
-    """Wait until Supabase schema cache is ready."""
+def _wait_for_supabase(max_wait: int = 30):
+    """Wait until Supabase is reachable."""
     import time
-    from db import client
-    sb = client()
-    for i in range(max_wait // 5):
-        try:
-            sb.table("prices").select("date").limit(1).execute()
-            return  # success
-        except Exception:
-            time.sleep(5)
-    raise RuntimeError("Supabase not ready after waiting")
+    from db import ping
+    for _ in range(max_wait // 5):
+        if ping():
+            return
+        time.sleep(5)
+    raise RuntimeError("Supabase not reachable after waiting")
 
 
 def push_current_quarter():

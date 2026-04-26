@@ -40,17 +40,6 @@ jobs:
       - name: Refresh fundamentals
         run: python fundamentals.py --simfin-key $SIMFIN_API_KEY
 
-      - name: Test Supabase connectivity
-        run: |
-          python -c "
-          import requests, os
-          url = os.environ['SUPABASE_URL'] + '/rest/v1/prices?select=date&limit=1'
-          key = os.environ['SUPABASE_SERVICE_KEY']
-          r = requests.get(url, headers={'apikey': key, 'Authorization': 'Bearer ' + key})
-          print('Status:', r.status_code)
-          print('Body:', r.text[:200])
-          "
-
       - name: Push new data to Supabase
         run: python migrate.py --quarter
 
