@@ -39,10 +39,11 @@ def _bulk_insert(df: pd.DataFrame, table: str, chunk: int = 10000):
               chunksize=chunk, method="multi")
 
 
-def migrate_index():
+def migrate_index(quarters: list = None):
+    if quarters is None:
+        quarters = sorted(d for d in os.listdir(DATA_DIR)
+                          if os.path.isdir(os.path.join(DATA_DIR, d)) and d[0].isdigit())
     frames = []
-    quarters = sorted(d for d in os.listdir(DATA_DIR)
-                      if os.path.isdir(os.path.join(DATA_DIR, d)) and d[0].isdigit())
     for q in quarters:
         p = os.path.join(DATA_DIR, q, "index.csv")
         if os.path.exists(p):
@@ -168,7 +169,7 @@ def push_current_quarter():
         conn.commit()
 
     migrate_prices_and_returns([label])
-    migrate_index()
+    migrate_index(quarters=[label])
     migrate_universe()
     migrate_fundamentals()
     print("Done.")
