@@ -3,22 +3,24 @@ Phase 4: Backtest Engine
 Computes monthly returns, applies transaction costs, runs factor attribution,
 and produces a tear sheet + charts.
 
-Sign convention (used everywhere):
-  long_return  = Σ weight_i × raw_return_i          (long positions)
-  short_return = Σ weight_i × (−raw_return_i)        (profit when shorts fall)
+Strategy: beta-hedged long book
+  long_return  = Σ weight_i × raw_return_i   (top-50 composite, equal-weighted)
+  short_return = −SPY_monthly_return          (single 100% NAV SPY hedge)
   total_return = long_return + short_return
 
+Rationale for SPY hedge vs individual shorts:
+  Within-S&P-500 individual shorts drag in a sustained bull market because
+  even the weakest index constituents get lifted by the tide. Replacing them
+  with a single SPY short isolates the long book's factor alpha without
+  paying per-stock friction on 50 short positions.
+
 Delisting assumption:
-  Prices are forward-filled. If a stock stops trading mid-month (acquisition,
-  removal), the last traded price is used as the terminal value. This correctly
-  captures acquisition premiums and avoids survivorship bias for longs; for
-  shorts it is conservative (actual covers would likely be at lower prices).
-  True bankruptcies in the S&P 500 universe are extremely rare.
+  Prices are forward-filled. Acquisition premiums are captured; true
+  bankruptcies in the S&P 500 universe are extremely rare.
 
 Transaction cost model:
-  Cost applied at each rebalance for positions entering or exiting.
-  Base:   5 bps one-way (10 bps round-trip) — institutional large-cap
-  Stress: 15 bps one-way (30 bps round-trip) — small fund / retail
+  Long side: 5 / 15 bps one-way per position entering or exiting.
+  SPY hedge: held constant at 100% NAV; negligible TC (~0.5 bps), omitted.
 """
 
 import os, sys, re, io, zipfile, requests
@@ -165,16 +167,11 @@ def compute_returns(portfolios: pd.DataFrame,
 
     port["contrib"] = port["weight"] * port["raw_ret"]
 
-    # Aggregate: sign-flip short contributions
+    # All positions are long; SPY short is added in run() after download
     def agg(grp):
-        l = grp[grp["side"] == "long"]["contrib"].sum()
-        s = -grp[grp["side"] == "short"]["contrib"].sum()   # sign flip here
         return pd.Series({
-            "long_return":  l,
-            "short_return": s,
-            "total_return": l + s,
-            "n_long":  (grp[grp["side"] == "long"]["raw_ret"].notna()).sum(),
-            "n_short": (grp[grp["side"] == "short"]["raw_ret"].notna()).sum(),
+            "long_return": grp["contrib"].sum(),
+            "n_long": grp["raw_ret"].notna().sum(),
         })
 
     monthly = (port.drop(columns=["exit_date"])
@@ -186,24 +183,20 @@ def compute_returns(portfolios: pd.DataFrame,
 
 def compute_tc(portfolios: pd.DataFrame, cost_bps: float) -> pd.Series:
     """
-    TC per period = (positions entering + exiting) × 2% weight × cost_bps / 10000.
-    Attributed to the period in which the rebalance occurs.
+    TC per period = long-side turnover × 2% weight × cost_bps / 10000.
+    SPY hedge is held constant so its TC is omitted (~0.5 bps, negligible).
     """
     dates = sorted(portfolios["formation_date"].unique())
     exit_map = {t: t1 for t, t1 in zip(dates[:-1], dates[1:])}
 
     costs = {}
-    prev_l, prev_s = set(), set()
+    prev_l = set()
 
     for t, t1 in exit_map.items():
-        curr_l = set(portfolios[(portfolios["formation_date"] == t) & (portfolios["side"] == "long")]["ticker"])
-        curr_s = set(portfolios[(portfolios["formation_date"] == t) & (portfolios["side"] == "short")]["ticker"])
-
-        n_trades = (len(curr_l - prev_l) + len(prev_l - curr_l) +
-                    len(curr_s - prev_s) + len(prev_s - curr_s))
+        curr_l = set(portfolios[portfolios["formation_date"] == t]["ticker"])
+        n_trades = len(curr_l - prev_l) + len(prev_l - curr_l)
         costs[t1] = n_trades * 0.02 * cost_bps / 10_000
-
-        prev_l, prev_s = curr_l, curr_s
+        prev_l = curr_l
 
     return pd.Series(costs, name="tc")
 
@@ -311,10 +304,10 @@ def print_tearsheet(m: dict, reg: dict):
                 for s in ["gross", "net_base", "net_stress", "benchmark"]]
         print(f"  {name:<30} {'  '.join(vals)}")
 
-    print("\n  LONG / SHORT BOOK")
-    for label, key in [("Long book", "long_book"), ("Short book", "short_book")]:
+    print("\n  LONG BOOK & SPY HEDGE")
+    for label, key in [("Long book", "long_book"), ("SPY hedge (−)", "short_book")]:
         d = m.get(key, {})
-        print(f"  {label:<15} Ann return: {d.get('ann_ret',0)*100:+.2f}%  "
+        print(f"  {label:<18} Ann return: {d.get('ann_ret',0)*100:+.2f}%  "
               f"Sharpe: {d.get('sharpe',0):.2f}  "
               f"Hit rate: {d.get('hit_rate',0)*100:.0f}%")
 
@@ -430,13 +423,7 @@ def run():
     print("Computing position returns...")
     monthly = compute_returns(portfolios, prices)
 
-    print("Computing transaction costs...")
-    monthly["tc_base"]   = compute_tc(portfolios, BASE_BPS).reindex(monthly.index).fillna(0)
-    monthly["tc_stress"] = compute_tc(portfolios, STRESS_BPS).reindex(monthly.index).fillna(0)
-
-    monthly.to_csv(RETURNS_PATH)
-    print(f"  Saved → {RETURNS_PATH}  ({len(monthly)} monthly periods)")
-
+    # SPY hedge: short_return = −SPY monthly return (100% NAV hedge)
     print("Downloading SPY benchmark...")
     try:
         benchmark = load_spy(str(monthly.index.min().date()),
@@ -444,6 +431,17 @@ def run():
     except Exception as e:
         print(f"  SPY download failed ({e}) — using zeros")
         benchmark = pd.Series(0.0, index=monthly.index, name="benchmark")
+
+    spy_monthly = benchmark.reindex(monthly.index).fillna(0)
+    monthly["short_return"] = -spy_monthly
+    monthly["total_return"] = monthly["long_return"] + monthly["short_return"]
+
+    print("Computing transaction costs...")
+    monthly["tc_base"]   = compute_tc(portfolios, BASE_BPS).reindex(monthly.index).fillna(0)
+    monthly["tc_stress"] = compute_tc(portfolios, STRESS_BPS).reindex(monthly.index).fillna(0)
+
+    monthly.to_csv(RETURNS_PATH)
+    print(f"  Saved → {RETURNS_PATH}  ({len(monthly)} monthly periods)")
 
     print("Downloading Fama-French factors...")
     try:
