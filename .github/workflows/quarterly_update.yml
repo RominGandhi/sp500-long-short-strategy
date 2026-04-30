@@ -15,8 +15,7 @@ jobs:
       contents: write
 
     env:
-      DATABASE_URL:   ${{ secrets.DATABASE_URL }}
-      SIMFIN_API_KEY: ${{ secrets.SIMFIN_API_KEY }}
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
 
     steps:
       - name: Checkout repo
@@ -28,7 +27,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install "pandas<2.2" yfinance requests lxml html5lib beautifulsoup4 simfin psycopg2-binary sqlalchemy python-dotenv numpy
+        run: pip install "pandas<2.2" yfinance requests lxml html5lib beautifulsoup4 psycopg2-binary sqlalchemy python-dotenv numpy
 
       - name: Pull new quarter prices
         run: python data_preprocessing/data_pipeline.py --update
@@ -36,17 +35,23 @@ jobs:
       - name: Rebuild point-in-time universe
         run: python data_preprocessing/universe.py
 
-      - name: Refresh fundamentals
-        run: python data_preprocessing/fundamentals.py --simfin-key $SIMFIN_API_KEY
+      - name: Refresh SEC fundamentals
+        run: python data_preprocessing/sec_fundamentals.py
 
-      - name: Push new data to Neon
+      - name: Refresh shares outstanding
+        run: python data_preprocessing/yfinance_shares.py
+
+      - name: Push prices to Neon
         run: python database/migrate.py
 
-      - name: Commit CSVs to repo
+      - name: Regenerate factor scores
+        run: python signals/factors.py
+
+      - name: Commit data and signals to repo
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/
+          git add data/ signals/
           git diff --cached --quiet && echo "No new data to commit" && exit 0
           QUARTER=$(python -c "
           import pandas as pd

@@ -1,0 +1,4 @@
+ticker,period_end,available_date,net_income,total_assets,equity,operating_cf,capex,free_cash_flow
+VTRS,2020-03-29,2020-05-12,0.0,0.0,0.0,0.0,,
+VTRS,2020-06-28,2020-08-12,-900000.0,11411800000.0,-1200000.0,,,
+VTRS,2020-09-27,2020-11-10,-169000000.0,11413000000.0,-201000000.0,,,
